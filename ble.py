@@ -1,35 +1,56 @@
 import asyncio
+import requests
 from bleak import BleakClient
-MAC_ADDRESS = "A8:42:E3:4A:A3:BE"
 
-# UUIDs of the service and characteristics
-SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-CHARACTERISTIC_UUID_1 = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
-CHARACTERISTIC_UUID_2 = "1c95d5e3-d8f7-413a-bf3d-7a2e5d7be87e"
+async def read_ble_device(mac_address):
+    async with BleakClient(mac_address) as client:
+        while True:
+            # Read the value of the characteristic
+            value = await client.read_gatt_char("beb5483e-36e1-4688-b7f5-ea07361b26a8")
+            #convert to string
+            data = value.decode("utf-8")
+            
+            #print("Health Data:", data)  
 
-# Convert received hex data to a string
-def hex_to_string(hex_data):
-    return bytes(hex_data).decode("utf-8")
+            # Parse the data
+            parsed_data = parse_health_data(data)
+            #remove in production code
+            print(parsed_data)
+            
+            await send_data_to_nodejs(parsed_data)
 
+            await asyncio.sleep(1)  
 
-async def handle_data(sender, data):
-    if sender == CHARACTERISTIC_UUID_1:
-        print("Characteristic 1 Value:", hex_to_string(data))
-    elif sender == CHARACTERISTIC_UUID_2:
-        print("Characteristic 2 Value:", hex_to_string(data))
+# Function to parse health data
+def parse_health_data(data):
+    split_data = data.split('.')
+    temperature = float(split_data[0])
+    hrv = float(split_data[1])
+    hr = float(split_data[2])
+    rr = float(split_data[3])
+    spo2 = float(split_data[4])
 
+    return {
+        "id": "OIGU3656",
+        "temperature": temperature,
+        "hr": hr,
+        "hrv": hrv,
+        "rr": rr,
+        "spo2": spo2
+    }
 
-async def run():
-    # Connect to the ESP device
-    client = BleakClient(MAC_ADDRESS)
-    await client.connect()
+# Function to send data to Node.js backend
+async def send_data_to_nodejs(data):
+    url = "https://cms-backend-five.vercel.app/api/ble/esp"
+    try:
+        response = requests.post(url, json=data)
+        print(response.text)
+    except Exception as e:
+        print("Error sending data to Node.js:", e)
 
-   
-    await client.start_notify(CHARACTERISTIC_UUID_1, handle_data)
-    await client.start_notify(CHARACTERISTIC_UUID_2, handle_data)
+async def main():
+    mac_address = "A8:42:E3:4A:A3:BE"
 
-    # Keep the program running to continuously receive notifications
-    while True:
-        await asyncio.sleep(1)
+    await read_ble_device(mac_address)
 
-asyncio.run(run())
+asyncio.run(main())
