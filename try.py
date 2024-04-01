@@ -31,6 +31,7 @@ def parse_health_data(data):
     spo2 = float(split_data[4])
 
     return {
+        "id": "OIGU3656",
         "temperature": temperature,
         "hr": hr,
         "hrv": hrv,
@@ -40,7 +41,7 @@ def parse_health_data(data):
 
 # Function to send data to Node.js backend
 async def send_data_to_nodejs(data):
-    url = "http://your-nodejs-backend-url/endpoint"
+    url = "https://cms-backend-five.vercel.app/api/ble/esp"
     try:
         response = requests.post(url, json=data)
         print(response.text)
