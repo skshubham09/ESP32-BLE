@@ -31,7 +31,7 @@ def parse_health_data(data):
     spo2 = float(split_data[4])
 
     return {
-        "id": "OIGU3656",
+        "id": "LA10AH0001",
         "temperature": temperature,
         "hr": hr,
         "hrv": hrv,
@@ -49,6 +49,7 @@ async def send_data_to_nodejs(data):
         print("Error sending data to Node.js:", e)
 
 async def main():
+    #replace this by MAC id of your device
     mac_address = "A8:42:E3:4A:A3:BE"
 
     await read_ble_device(mac_address)

@@ -1,0 +1,1 @@
+data = ser.readline().decode('utf-8').strip()
