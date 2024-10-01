@@ -4,9 +4,10 @@ import requests
 import json
 
 # Configure the serial port and Bluetooth connection
-ser = serial.Serial('COM3', baudrate=115200, timeout=1)  # Update the port as necessary
+ser = serial.Serial('COM8', baudrate=115200, timeout=1)  # Update the port as necessary
 
 API_URL = "https://cms-backend-five.vercel.app/api/ble/esp"
+JAWAAN_ID = "12345"  # Set the specific jawaan ID here
 
 def parse_data(data):
     parsed_data = {}
@@ -54,13 +55,16 @@ def parse_data(data):
 
     battery_match = re.search(r'Battery Percentage: (\d+)', data)
     if battery_match:
-        parsed_data['Battery Percentage'] = int(battery_match.group(1))
+        parsed_data['Battery Percentage'] = int(battery_match.group(1)) 
 
     # Return the parsed data
     return parsed_data
 
-def send_data_to_nodejs(parsed_data):
+def send_data_to_nodejs(parsed_data, jawaan_id):
     try:
+        # Add jawaan_id to the data being sent
+        parsed_data['jawaan_id'] = jawaan_id  
+
         response = requests.post(API_URL, json=parsed_data)
         print(f"Data sent to API: {parsed_data}")
         print(f"Response: {response.text}")
@@ -79,7 +83,7 @@ def main():
             
             # If we have valid parsed data, send it to the API
             if parsed_data:
-                send_data_to_nodejs(parsed_data)
+                send_data_to_nodejs(parsed_data, JAWAAN_ID)
 
 if __name__ == "__main__":
     main()
