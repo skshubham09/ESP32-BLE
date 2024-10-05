@@ -18,7 +18,7 @@ last_message_id = None
 def parse_data(data):
     parsed_data = {}
     parsed_data['id'] = DEVICE_ID
-
+    parsed_data['uid'] = "JW001" 
     # Extract values using regular expressions
     temp_match = re.search(r'Body temperature: (\d+)', data)
     if temp_match:
@@ -86,15 +86,33 @@ def parse_data(data):
 
     if "Emergency" in data:
         parsed_data['fallDamage'] = True
+        send_alert_to_backend("JW001", "Emergency detected")
 
     if "YES" in data or "NO" in data or "HELP" in data or "PENDING" in data or "RESOLVED" in data:
         parsed_data['textCommand'] = data.strip()
+        send_alert_to_backend("JW001", data.strip())
 
     return parsed_data
 
+def send_alert_to_backend(jawaan_id, message):
+    alert_api_url = "https://cms-backend-five.vercel.app/api/alert/watchTosw"
+    payload = {
+        "jawaanId": jawaan_id,
+        "message": message
+    }
+    try:
+        response = requests.post(alert_api_url, json=payload)
+        if response.status_code == 200:
+            print(f"Alert sent successfully: {payload}")
+        else:
+            print(f"Failed to send alert. Status code: {response.status_code}, Response: {response.text}")
+    except Exception as e:
+        print(f"Error sending alert: {e}")
+
+
 def send_data_to_nodejs(parsed_data):
     try:
-        if len(parsed_data) > 1:
+        if len(parsed_data) > 2:
             response = requests.post(API_URL, json=parsed_data)
             print(f"Data sent to API: {parsed_data}")
             print(f"Response: {response.text}")
@@ -117,12 +135,29 @@ def send_data_to_device(data):
         ser.write(data.encode('utf-8'))
         print(f"Data sent: {data}")
         response = ser.readline().decode('utf-8').strip()
+        
         if response:
             print(f"Response from device: {response}")
         else:
             print("No response from device.")
     except Exception as e:
         print(f"Error sending data: {e}")
+
+def delete_message_by_id(message_id):
+    try:
+        # Construct the delete API URL with the message ID
+        delete_api_url = f"https://cms-backend-five.vercel.app/api/alert/readedSwToW/{message_id}"
+        
+        # # Perform a GET request to delete the message by its ID
+        response = requests.put(delete_api_url)
+        # print(response)
+        # # Check if the request was successful
+        # if response.status_code == 200:
+        #     print(f"Message with ID {message_id} deleted successfully.")
+        # else:
+        #     print(f"Failed to delete message with ID {message_id}. Status code: {response.status_code}")
+    except Exception as e:
+        print(f"Error deleting message with ID {message_id}: {e}")
 
 def fetch_latest_message():
     global last_message_id
@@ -149,12 +184,16 @@ def fetch_latest_message():
     return None
 
 def write_to_device():
+    global last_message_id
     while True:
         latest_message = fetch_latest_message()
 
         # If there's a new message, send it to the device
         if latest_message:
             send_data_to_device(latest_message)
+            if last_message_id:
+                delete_message_by_id(last_message_id)
+
 
         # Wait for a few seconds before checking again
         time.sleep(5)
