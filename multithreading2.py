@@ -4,21 +4,33 @@ import requests
 import threading
 import time
 
-# Configure the serial port and Bluetooth connection
-ser = serial.Serial('COM8', baudrate=115200, timeout=1)  # Update the port as necessary
+# API and device configuration
 API_URL = "https://cms-backend-five.vercel.app/api/ble/esp"
-DEVICE_ID = "LA10AH0001"  # Static device ID
+DEVICE_IDS = ['LA10AH0001', 'LA10AH0002']  # Device IDs for the two devices
+PORTS = ['COM7', 'COM10']  # Serial ports corresponding to each device
+UIDS = ['JW001', 'JW002']  # Unique IDs for each device
 
-# API URL for fetching messages to send to the device
+# API URL for fetching messages to send to the devices
 alert_api_url = "https://cms-backend-five.vercel.app/api/alert/readAlertReply"
+last_message_id = {device_id: None for device_id in DEVICE_IDS}  # Track last message ID for each device
 
-# Keep track of the last sent message ID to detect new messages
-last_message_id = None
+# Dictionary to hold serial connections for each device
+serial_connections = {device_id: None for device_id in DEVICE_IDS}
 
-def parse_data(data):
-    parsed_data = {}
-    parsed_data['id'] = DEVICE_ID
-    parsed_data['uid'] = "JW001" 
+# Initialize serial connections for each device
+def initialize_serial_connections():
+    for idx, port in enumerate(PORTS):
+        try:
+            ser = serial.Serial(port, baudrate=115200, timeout=1)
+            serial_connections[DEVICE_IDS[idx]] = ser
+            print(f"Initialized serial connection for {DEVICE_IDS[idx]} on port {port}")
+        except Exception as e:
+            print(f"Error initializing serial connection on {port}: {e}")
+
+# Parse data for each device based on the device ID and UID
+def parse_data(data, device_id, uid):
+    parsed_data = {'id': device_id, 'uid': uid}
+    
     # Extract values using regular expressions
     temp_match = re.search(r'Body temperature: (\d+)', data)
     if temp_match:
@@ -86,14 +98,15 @@ def parse_data(data):
 
     if "Emergency" in data:
         parsed_data['fallDamage'] = True
-        send_alert_to_backend("JW001", "Emergency detected")
+        send_alert_to_backend(uid, "Emergency detected")
 
-    if "YES" in data or "NO" in data or "HELP" in data or "PENDING" in data or "RESOLVED" in data:
+    if any(x in data for x in ["YES", "NO", "HELP", "PENDING", "RESOLVED"]):
         parsed_data['textCommand'] = data.strip()
-        send_alert_to_backend("JW001", data.strip())
+        send_alert_to_backend(uid, data.strip())
 
     return parsed_data
 
+# Send alert to the backend
 def send_alert_to_backend(jawaan_id, message):
     alert_api_url = "https://cms-backend-five.vercel.app/api/alert/watchTosw"
     payload = {
@@ -109,7 +122,7 @@ def send_alert_to_backend(jawaan_id, message):
     except Exception as e:
         print(f"Error sending alert: {e}")
 
-
+# Send parsed data to Node.js backend
 def send_data_to_nodejs(parsed_data):
     try:
         if len(parsed_data) > 2:
@@ -119,96 +132,88 @@ def send_data_to_nodejs(parsed_data):
     except Exception as e:
         print(f"Error sending data to Node.js: {e}")
 
-def read_from_device():
+# Function to read from the serial device
+def read_from_device(device_id, uid):
+    ser = serial_connections[device_id]
     while True:
         try:
             data = ser.readline().decode('utf-8').strip()
             if data:
-                parsed_data = parse_data(data)
+                parsed_data = parse_data(data, device_id, uid)
                 if parsed_data:
                     send_data_to_nodejs(parsed_data)
         except Exception as e:
-            print(f"Error reading data: {e}")
+            print(f"Error reading data from {device_id}: {e}")
 
-def send_data_to_device(data):
+# Function to send data to the device
+def send_data_to_device(device_id, data):
+    ser = serial_connections[device_id]
     try:
         ser.write(data.encode('utf-8'))
-        print(f"Data sent: {data}")
+        print(f"Data sent to {device_id}: {data}")
         response = ser.readline().decode('utf-8').strip()
-        
-        # if response:
-        #     print(f"Response from device: {response}")
-        # else:
-        #     print("No response from device.")
-    except Exception as e:
-        
-        print(f"Error sending data: {e}")
 
-def delete_message_by_id(message_id):
-    try:
-        # Construct the delete API URL with the message ID
-        delete_api_url = f"https://cms-backend-five.vercel.app/api/alert/readedSwToW/{message_id}"
-        
-        # # Perform a GET request to delete the message by its ID
-        response = requests.put(delete_api_url)
-        
-        # print(response)
-        # # Check if the request was successful
-        # if response.status_code == 200:
-        #     print(f"Message with ID {message_id} deleted successfully.")
-        # else:
-        #     print(f"Failed to delete message with ID {message_id}. Status code: {response.status_code}")
+        if response:
+            print(f"Response from {device_id}: {response}")
+        else:
+            print(f"No response from {device_id}.")
     except Exception as e:
-        print(f"Error deleting message with ID {message_id}: {e}")
+        print(f"Error sending data to {device_id}: {e}")
 
-def fetch_latest_message():
+# Function to fetch the latest message for a given UID
+def fetch_latest_message(uid):
     global last_message_id
 
     try:
-        # Perform a GET request to fetch the data from the API
         response = requests.get(alert_api_url)
         if response.status_code == 200:
             data = response.json()
-
-            # Check if the API call was successful
             if data["success"]:
                 for message in data["mssg"]:
-                    if message["jawaanId"] == "JW001" and not message["resolved"]:
-                        # Check if the message is new by comparing the messageId
-                        if message["messageId"] != last_message_id:
-                            last_message_id = message["messageId"]
+                    if message["jawaanId"] == uid and not message["resolved"]:
+                        if message["messageId"] != last_message_id[uid]:
+                            last_message_id[uid] = message["messageId"]
                             return message["message"]
         else:
             print(f"Failed to fetch data. Status code: {response.status_code}")
     except Exception as e:
         print(f"Error fetching data: {e}")
-
     return None
 
-def write_to_device():
+# Function to delete the message by ID
+def delete_message_by_id(message_id, uid):
+    try:
+        delete_api_url = f"https://cms-backend-five.vercel.app/api/alert/readedSwToW/{message_id}"
+        response = requests.put(delete_api_url)
+    except Exception as e:
+        print(f"Error deleting message for {uid}: {e}")
+
+# Function to write data to the device
+def write_to_device(device_id, uid):
     global last_message_id
     while True:
-        latest_message = fetch_latest_message()
-
-        # If there's a new message, send it to the device
+        latest_message = fetch_latest_message(uid)
         if latest_message:
-            send_data_to_device(latest_message)
-            if last_message_id:
-                delete_message_by_id(last_message_id)
-
-
-        # Wait for a few seconds before checking again
+            send_data_to_device(device_id, latest_message)
+            if last_message_id[uid]:
+                delete_message_by_id(last_message_id[uid], uid)
         time.sleep(5)
 
 if __name__ == "__main__":
-    # Create two threads: one for reading and one for writing
-    read_thread = threading.Thread(target=read_from_device)
-    write_thread = threading.Thread(target=write_to_device)
+    # Initialize serial connections
+    initialize_serial_connections()
 
-    # Start both threads
-    read_thread.start()
-    write_thread.start()
+    # Create separate threads for reading and writing for each device
+    threads = []
+    for i, device_id in enumerate(DEVICE_IDS):
+        read_thread = threading.Thread(target=read_from_device, args=(device_id, UIDS[i]))
+        write_thread = threading.Thread(target=write_to_device, args=(device_id, UIDS[i]))
+        threads.extend([read_thread, write_thread])
 
-    # Wait for both threads to complete
-    read_thread.join()
-    write_thread.join()
+    # Start all threads
+    for thread in threads:
+        thread.start()
+
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()

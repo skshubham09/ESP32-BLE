@@ -1,19 +1,19 @@
-import serial
+import asyncio
 import re
-import requests
-import threading
-import time
+import aiohttp
+import serial_asyncio
 
 API_URL = "https://cms-backend-five.vercel.app/api/ble/esp"
 DEVICE_IDS = ['LA10AH0001', 'LA10AH0002']  # Device IDs for the two devices
-PORTS = ['COM7', 'COM10']  # Serial ports corresponding to each device
-UIDS = ['JW001', 'JW002']  # Unique IDs for each device
+PORTS = ['COM7', 'COM8']  # Serial ports corresponding to each device
+ALERT_API_URL = "https://cms-backend-five.vercel.app/api/alert/readAlertReply"
 
-alert_api_url = "https://cms-backend-five.vercel.app/api/alert/readAlertReply"
-last_message_id = {device_id: None for device_id in DEVICE_IDS}  # Keep track of the last message ID for each device
+# Keep track of the last message ID for each device
+last_message_id = {device_id: None for device_id in DEVICE_IDS}
 
-def parse_data(data, device_id, uid):
-    parsed_data = {'id': device_id, 'uid': uid}
+# Function to parse incoming data
+def parse_data(data, device_id):
+    parsed_data = {'id': device_id}
 
     # Extract values using regular expressions
     temp_match = re.search(r'Body temperature: (\d+)', data)
@@ -70,13 +70,14 @@ def parse_data(data, device_id, uid):
 
     decibel_match = re.search(r'(\d+)\s+dB', data)
     if decibel_match:
-        parsed_data['rssi'] = int(decibel_match.group(1))
+        decibel = int(decibel_match.group(1))
+        parsed_data['rssi'] = decibel
 
-        if 10 < parsed_data['rssi'] < 30:
+        if 10 < decibel < 30:
             parsed_data['textCommand'] = "Warning"
-        elif 40 < parsed_data['rssi'] < 60:
+        elif 40 < decibel < 60:
             parsed_data['textCommand'] = "Alert"
-        elif 70 < parsed_data['rssi'] < 90:
+        elif 70 < decibel < 90:
             parsed_data['textCommand'] = "Emergency"
 
     if "Emergency" in data:
@@ -87,63 +88,74 @@ def parse_data(data, device_id, uid):
 
     return parsed_data
 
-def send_data_to_nodejs(parsed_data):
-    if len(parsed_data) > 2:
+# Function to send data to the Node.js API
+async def send_data_to_nodejs(parsed_data):
+    if len(parsed_data) > 1:
         try:
-            response = requests.post(API_URL, json=parsed_data)
-            print(f"Data sent to API: {parsed_data}")
-            print(f"Response: {response.text}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(API_URL, json=parsed_data) as response:
+                    print(f"Data sent to API: {parsed_data}")
+                    print(f"Response: {await response.text()}")
         except Exception as e:
             print(f"Error sending data to Node.js: {e}")
 
-def fetch_latest_message(device_id, uid):
+# Function to fetch the latest message from the API
+async def fetch_latest_message(device_id):
     try:
-        response = requests.get(alert_api_url)
-        if response.status_code == 200:
-            data = response.json()
-            if data["success"]:
-                for message in data["mssg"]:
-                    if message["jawaanId"] == uid and not message["resolved"]:
-                        if message["messageId"] != last_message_id[device_id]:
-                            last_message_id[device_id] = message["messageId"]
-                            return message["message"]
+        async with aiohttp.ClientSession() as session:
+            async with session.get(ALERT_API_URL) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data["success"]:
+                        for message in data["mssg"]:
+                            if message["jawaanId"] == "JW001" and not message["resolved"]:
+                                if message["messageId"] != last_message_id[device_id]:
+                                    last_message_id[device_id] = message["messageId"]
+                                    return message["message"]
     except Exception as e:
         print(f"Error fetching data: {e}")
     return None
 
-def read_from_device(port, device_id, uid):
-    ser = serial.Serial(port, baudrate=115200, timeout=1)
+# Asynchronous function to handle reading from the device
+async def handle_read(reader, device_id):
     while True:
         try:
-            data = ser.readline().decode('utf-8').strip()
+            data = await reader.read(1024)
             if data:
-                parsed_data = parse_data(data, device_id, uid)
-                send_data_to_nodejs(parsed_data)
+                decoded_data = data.decode('utf-8').strip()
+                parsed_data = parse_data(decoded_data, device_id)
+                await send_data_to_nodejs(parsed_data)
         except Exception as e:
             print(f"Error reading data from {device_id}: {e}")
 
-def send_data_to_device(port, device_id, uid):
-    ser = serial.Serial(port, baudrate=115200, timeout=1)
+# Asynchronous function to handle writing to the device
+async def handle_write(writer, device_id):
     while True:
-        latest_message = fetch_latest_message(device_id, uid)
+        latest_message = await fetch_latest_message(device_id)
         if latest_message:
             try:
-                ser.write(latest_message.encode('utf-8'))
+                writer.write(latest_message.encode('utf-8'))
+                await writer.drain()
                 print(f"Data sent to {device_id}: {latest_message}")
             except Exception as e:
                 print(f"Error sending data to {device_id}: {e}")
-        time.sleep(5)
+        await asyncio.sleep(5)
 
-def manage_device(port, device_id, uid):
-    read_thread = threading.Thread(target=read_from_device, args=(port, device_id, uid))
-    write_thread = threading.Thread(target=send_data_to_device, args=(port, device_id, uid))
+# Function to manage both reading and writing for a device
+async def manage_device(port, device_id):
+    reader, writer = await serial_asyncio.open_serial_connection(url=port, baudrate=115200)
+    read_task = asyncio.create_task(handle_read(reader, device_id))
+    write_task = asyncio.create_task(handle_write(writer, device_id))
 
-    read_thread.start()
-    write_thread.start()
+    await asyncio.gather(read_task, write_task)
 
-    read_thread.join()
-    write_thread.join()
+# Main function to start the asyncio event loop and manage devices
+async def main():
+    tasks = []
+    for port, device_id in zip(PORTS, DEVICE_IDS):
+        tasks.append(manage_device(port, device_id))
+    await asyncio.gather(*tasks)
 
+# Run the main function
 if __name__ == "__main__":
-    for port, device_id, uid in zip(PORTS, DEVICE_IDS, UIDS):
-        threading.Thread(target=manage_device, args=(port, device_id, uid)).start()
+    asyncio.run(main())
