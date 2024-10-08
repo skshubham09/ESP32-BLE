@@ -8,7 +8,6 @@ import time
 ser = serial.Serial('COM8', baudrate=115200, timeout=1)  # Update the port as necessary
 API_URL = "https://cms-backend-five.vercel.app/api/ble/esp"
 DEVICE_ID = "LA10AH0001"  # Static device ID
-jawaan_id="JW001" 
 
 # API URL for fetching messages to send to the device
 alert_api_url = "https://cms-backend-five.vercel.app/api/alert/readAlertReply"
@@ -16,21 +15,10 @@ alert_api_url = "https://cms-backend-five.vercel.app/api/alert/readAlertReply"
 # Keep track of the last sent message ID to detect new messages
 last_message_id = None
 
-# Global variables to store connection status and last device ID timestamp
-last_device_id_timestamp = None
-is_connected = False
-
-
 def parse_data(data):
-    global last_device_id_timestamp
     parsed_data = {}
     parsed_data['id'] = DEVICE_ID
-    parsed_data['uid'] = jawaan_id
-
-    # Check if the device ID is in the data and update the timestamp
-    if DEVICE_ID in data:
-        last_device_id_timestamp = time.time()  # Update timestamp on every received ID
-
+    parsed_data['uid'] = "JW001" 
     # Extract values using regular expressions
     temp_match = re.search(r'Body temperature: (\d+)', data)
     if temp_match:
@@ -100,12 +88,11 @@ def parse_data(data):
         parsed_data['fallDamage'] = True
         send_alert_to_backend("JW001", "Emergency detected: FALLDAMAGE")
 
-    if "YES" in data or "NO" in data or "HELP" in data or "PENDING" in data or "RESOLVED" in data or "EMERGENCY" in data:
+    if "YES" in data or "NO" in data or "HELP" in data or "PENDING" in data or "RESOLVED" in data:
         parsed_data['textCommand'] = data.strip()
         send_alert_to_backend("JW001", data.strip())
 
     return parsed_data
-
 
 def send_alert_to_backend(jawaan_id, message):
     alert_api_url = "https://cms-backend-five.vercel.app/api/alert/watchTosw"
@@ -133,42 +120,48 @@ def send_data_to_nodejs(parsed_data):
         print(f"Error sending data to Node.js: {e}")
 
 
-def check_connection_status():
-    global is_connected, last_device_id_timestamp
-    while True:
-        current_time = time.time()
-        # Check if deviceId was received in the last 5 seconds
-        if last_device_id_timestamp and (current_time - last_device_id_timestamp <= 5):
-            if not is_connected:
-                print("Device reconnected.")
-                is_connected = True  # Update status when device reconnects
+def notify_connection_status(status):
+    api_url = "https://cms-backend-five.vercel.app/api/device/connectionStatus"
+    payload = {
+        "deviceId": DEVICE_ID,
+        "status": status
+    }
+    try:
+        response = requests.post(api_url, json=payload)
+        if response.status_code == 200:
+            print(f"Device status {status} sent successfully")
         else:
-            if is_connected:
-                print("Device disconnected.")
-                is_connected = False  # Update status when device disconnects
+            print(f"Failed to send device status. Status code: {response.status_code}, Response: {response.text}")
+    except Exception as e:
+        print(f"Error sending device status: {e}")
 
-        # Prepare the data to send, including the status
-        status_data = {
-            "id": DEVICE_ID,
-            "uid": "JW001",
-            "status": is_connected
-        }
-
-        # Send the updated status to Node.js
-        send_data_to_nodejs(status_data)
-
-        # Wait for 5 seconds before checking again
-        time.sleep(5)
-        
-        
 def read_from_device():
+    global last_received_time, connected
+
+    DISCONNECT_THRESHOLD = 10  # Time in seconds to consider the device disconnected
+
     while True:
         try:
             data = ser.readline().decode('utf-8').strip()
+            
             if data:
+                last_received_time = time.time()  # Update the last received time when data is received
+                
+                # If data is received and the device was considered disconnected, notify it's connected
+                if not connected:
+                    connected = True
+                    notify_connection_status("connected")
+                
                 parsed_data = parse_data(data)
-                if parsed_data:
+                if parsed_data and len(parsed_data) > 2:
                     send_data_to_nodejs(parsed_data)
+            else:
+                # Check if the device is disconnected due to lack of data
+                if time.time() - last_received_time > DISCONNECT_THRESHOLD:
+                    if connected:
+                        connected = False
+                        notify_connection_status("disconnected")
+                        
         except Exception as e:
             print(f"Error reading data: {e}")
 
@@ -178,20 +171,31 @@ def send_data_to_device(data):
         ser.write(data.encode('utf-8'))
         print(f"Data sent: {data}")
         response = ser.readline().decode('utf-8').strip()
+        
+        # if response:
+        #     print(f"Response from device: {response}")
+        # else:
+        #     print("No response from device.")
     except Exception as e:
+        
         print(f"Error sending data: {e}")
-
 
 def delete_message_by_id(message_id):
     try:
         # Construct the delete API URL with the message ID
         delete_api_url = f"https://cms-backend-five.vercel.app/api/alert/readedSwToW/{message_id}"
         
-        # Perform a PUT request to delete the message by its ID
+        # # Perform a GET request to delete the message by its ID
         response = requests.put(delete_api_url)
+        
+        # print(response)
+        # # Check if the request was successful
+        # if response.status_code == 200:
+        #     print(f"Message with ID {message_id} deleted successfully.")
+        # else:
+        #     print(f"Failed to delete message with ID {message_id}. Status code: {response.status_code}")
     except Exception as e:
         print(f"Error deleting message with ID {message_id}: {e}")
-
 
 def fetch_latest_message():
     global last_message_id
@@ -217,7 +221,6 @@ def fetch_latest_message():
 
     return None
 
-
 def write_to_device():
     global last_message_id
     while True:
@@ -229,20 +232,19 @@ def write_to_device():
             if last_message_id:
                 delete_message_by_id(last_message_id)
 
-        # Wait for a few seconds before checking again
-        #time.sleep(5)
 
+        # Wait for a few seconds before checking again
+        time.sleep(5)
 
 if __name__ == "__main__":
-    # Create threads for reading data, writing data, and checking connection status
+    # Create two threads: one for reading and one for writing
     read_thread = threading.Thread(target=read_from_device)
     write_thread = threading.Thread(target=write_to_device)
-    connection_status_thread = threading.Thread(target=check_connection_status)
 
+    # Start both threads
     read_thread.start()
     write_thread.start()
-    connection_status_thread.start()
 
+    # Wait for both threads to complete
     read_thread.join()
     write_thread.join()
-    connection_status_thread.join()
