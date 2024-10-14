@@ -84,23 +84,27 @@ def parse_data(data):
     if battery_match:
         parsed_data['battery'] = int(battery_match.group(1))
 
-    decibel_match = re.search(r'(\d+)\s+dB', data)
+    # Extract decibel value and handle noise alerts
+    decibel_match = re.search(r'Noise Alert\s+(\d+\.?\d*)', data)
     if decibel_match:
-        decibel = int(decibel_match.group(1))
-        parsed_data['rssi'] = decibel  # Assuming RSSI is decibel level
+        decibel = float(decibel_match.group(1))
+        parsed_data['decibel'] = decibel
 
-        if 10 < decibel < 30:
-            parsed_data['textCommand'] = "Warning"
-        elif 40 < decibel < 60:
-            parsed_data['textCommand'] = "Alert"
-        elif 70 < decibel < 90:
-            parsed_data['textCommand'] = "Emergency"
+        if decibel > 90:
+            parsed_data['noiseAlert'] = True
+            send_alert_to_backend("JW001", f"Noise Alert: {decibel} dB")
+        else:
+            parsed_data['noiseAlert'] = False
 
     if "Emergency" in data:
         parsed_data['fallDamage'] = True
         send_alert_to_backend("JW001", "Emergency detected: FALLDAMAGE")
+    
+    if "OoR" in data:
+        parsed_data['outOfRange'] = True
+        send_alert_to_backend("JW001", "Out of Range!")
 
-    if "YES" in data or "NO" in data or "HELP" in data or "PENDING" in data or "RESOLVED" in data or "EMERGENCY" in data:
+    if any(keyword in data for keyword in ["YES", "NO", "HELP", "PENDING", "RESOLVED", "EMERGENCY"]):
         parsed_data['textCommand'] = data.strip()
         send_alert_to_backend("JW001", data.strip())
 
@@ -131,6 +135,7 @@ def send_data_to_nodejs(parsed_data):
             print(f"Response: {response.text}")
     except Exception as e:
         print(f"Error sending data to Node.js: {e}")
+
 
 
 def check_connection_status():

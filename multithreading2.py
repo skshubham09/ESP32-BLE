@@ -4,33 +4,45 @@ import requests
 import threading
 import time
 
-# API and device configuration
+# Configure the serial port and Bluetooth connection
+ser = serial.Serial('COM8', baudrate=115200, timeout=1)  # Update the port as necessary
 API_URL = "https://cms-backend-five.vercel.app/api/ble/esp"
-DEVICE_IDS = ['LA10AH0001', 'LA10AH0002']  # Device IDs for the two devices
-PORTS = ['COM7', 'COM10']  # Serial ports corresponding to each device
-UIDS = ['JW001', 'JW002']  # Unique IDs for each device
+DEVICE_ID = "LA10AH0001"  # Static device ID
+jawaan_id = "JW001"
 
-# API URL for fetching messages to send to the devices
+# API URL for fetching messages to send to the device
 alert_api_url = "https://cms-backend-five.vercel.app/api/alert/readAlertReply"
-last_message_id = {device_id: None for device_id in DEVICE_IDS}  # Track last message ID for each device
 
-# Dictionary to hold serial connections for each device
-serial_connections = {device_id: None for device_id in DEVICE_IDS}
+# Keep track of the last sent message ID to detect new messages
+last_message_id = None
 
-# Initialize serial connections for each device
-def initialize_serial_connections():
-    for idx, port in enumerate(PORTS):
-        try:
-            ser = serial.Serial(port, baudrate=115200, timeout=1)
-            serial_connections[DEVICE_IDS[idx]] = ser
-            print(f"Initialized serial connection for {DEVICE_IDS[idx]} on port {port}")
-        except Exception as e:
-            print(f"Error initializing serial connection on {port}: {e}")
+# Global variables to store connection status and last device ID timestamp
+last_device_id_timestamp = None
+is_connected = False
 
-# Parse data for each device based on the device ID and UID
-def parse_data(data, device_id, uid):
-    parsed_data = {'id': device_id, 'uid': uid}
-    
+# To keep track of active threads
+threads = {
+    'read': None,
+    'write': None,
+    'connection_status': None
+}
+
+stop_threads = False  # Flag to stop all threads when needed
+
+
+def parse_data(data):
+    global last_device_id_timestamp, is_connected
+    parsed_data = {}
+    parsed_data['id'] = DEVICE_ID
+    parsed_data['uid'] = jawaan_id
+
+    # Check if the device ID is in the data and update the timestamp
+    if DEVICE_ID in data:
+        last_device_id_timestamp = time.time()  # Update timestamp on every received ID
+        if not is_connected:
+            is_connected = True  # Update connection status to True when receiving valid data
+            print("Device reconnected and sending valid data.")
+
     # Extract values using regular expressions
     temp_match = re.search(r'Body temperature: (\d+)', data)
     if temp_match:
@@ -84,29 +96,33 @@ def parse_data(data, device_id, uid):
     if battery_match:
         parsed_data['battery'] = int(battery_match.group(1))
 
-    decibel_match = re.search(r'(\d+)\s+dB', data)
+    # Extract decibel value and handle noise alerts
+    decibel_match = re.search(r'Noise Alert\s+(\d+\.?\d*)', data)
     if decibel_match:
-        decibel = int(decibel_match.group(1))
-        parsed_data['rssi'] = decibel  # Assuming RSSI is decibel level
+        decibel = float(decibel_match.group(1))
+        parsed_data['decibel'] = decibel
 
-        if 10 < decibel < 30:
-            parsed_data['textCommand'] = "Warning"
-        elif 40 < decibel < 60:
-            parsed_data['textCommand'] = "Alert"
-        elif 70 < decibel < 90:
-            parsed_data['textCommand'] = "Emergency"
+        if decibel > 90:
+            parsed_data['noiseAlert'] = True
+            send_alert_to_backend("JW001", f"Noise Alert: {decibel} dB")
+        else:
+            parsed_data['noiseAlert'] = False
 
     if "Emergency" in data:
         parsed_data['fallDamage'] = True
-        send_alert_to_backend(uid, "Emergency detected")
+        send_alert_to_backend("JW001", "Emergency detected: FALLDAMAGE")
+    
+    if "OoR" in data:
+        parsed_data['outOfRange'] = True
+        send_alert_to_backend("JW001", "Out of Range!")
 
-    if any(x in data for x in ["YES", "NO", "HELP", "PENDING", "RESOLVED"]):
+    if any(keyword in data for keyword in ["YES", "NO", "HELP", "PENDING", "RESOLVED", "EMERGENCY"]):
         parsed_data['textCommand'] = data.strip()
-        send_alert_to_backend(uid, data.strip())
+        send_alert_to_backend("JW001", data.strip())
 
     return parsed_data
 
-# Send alert to the backend
+
 def send_alert_to_backend(jawaan_id, message):
     alert_api_url = "https://cms-backend-five.vercel.app/api/alert/watchTosw"
     payload = {
@@ -116,104 +132,152 @@ def send_alert_to_backend(jawaan_id, message):
     try:
         response = requests.post(alert_api_url, json=payload)
         if response.status_code == 200:
-            print(f"Alert sent successfully: {payload}")
+            print(f"Alert sent successfully API2: {payload}")
         else:
             print(f"Failed to send alert. Status code: {response.status_code}, Response: {response.text}")
     except Exception as e:
         print(f"Error sending alert: {e}")
 
-# Send parsed data to Node.js backend
+
 def send_data_to_nodejs(parsed_data):
     try:
         if len(parsed_data) > 2:
             response = requests.post(API_URL, json=parsed_data)
-            print(f"Data sent to API: {parsed_data}")
+            print(f"Data sent to software using API_1: {parsed_data}")
             print(f"Response: {response.text}")
     except Exception as e:
         print(f"Error sending data to Node.js: {e}")
 
-# Function to read from the serial device
-def read_from_device(device_id, uid):
-    ser = serial_connections[device_id]
-    while True:
+
+def log_device_status(message):
+    """
+    Send a log message to the provided API to track connection status.
+    :param message: The message describing the device status (connected or disconnected).
+    """
+    log_api_url = "https://cms-backend-five.vercel.app/api/log/createLogs"
+    payload = {
+        "id": DEVICE_ID,  # Use the DEVICE_ID as the ID
+        "message": message  # Log the connection/disconnection message
+    }
+    try:
+        response = requests.post(log_api_url, json=payload)
+        if response.status_code == 200:
+            print(f"Device status logged successfully: {message}")
+        else:
+            print(f"Failed to log device status. Status code: {response.status_code}, Response: {response.text}")
+    except Exception as e:
+        print(f"Error logging device status: {e}")
+
+
+def check_connection_status():
+    global is_connected, last_device_id_timestamp, stop_threads
+    while not stop_threads:
+        current_time = time.time()
+        # Check if deviceId was received in the last 5 seconds
+        if last_device_id_timestamp and (current_time - last_device_id_timestamp <= 5):
+            if not is_connected:
+                print("Device reconnected.")
+                is_connected = True  # Update status when device reconnects
+                start_threads()  # Restart threads on reconnection
+                log_device_status("Device reconnected")  # Log the reconnection event
+        else:
+            if is_connected:
+                print("Device disconnected.")
+                is_connected = False  # Update status when device disconnects
+                stop_all_threads()  # Stop threads on disconnection
+                log_device_status("Device disconnected")  # Log the disconnection event
+
+        # Prepare the data to send, including the status
+        status_data = {
+            "id": DEVICE_ID,
+            "uid": "JW001",
+            "status": is_connected
+        }
+
+        # Send the updated status to Node.js
+        send_data_to_nodejs(status_data)
+
+        # Wait for 5 seconds before checking again
+        time.sleep(5)
+
+
+def read_from_device():
+    global stop_threads
+    while not stop_threads:
         try:
             data = ser.readline().decode('utf-8').strip()
             if data:
-                parsed_data = parse_data(data, device_id, uid)
+                parsed_data = parse_data(data)
                 if parsed_data:
                     send_data_to_nodejs(parsed_data)
         except Exception as e:
-            print(f"Error reading data from {device_id}: {e}")
+            print(f"Error reading data: {e}")
 
-# Function to send data to the device
-def send_data_to_device(device_id, data):
-    ser = serial_connections[device_id]
+
+def send_data_to_device(data):
     try:
         ser.write(data.encode('utf-8'))
-        print(f"Data sent to {device_id}: {data}")
+        print(f"Data sent: {data}")
         response = ser.readline().decode('utf-8').strip()
-
-        if response:
-            print(f"Response from {device_id}: {response}")
-        else:
-            print(f"No response from {device_id}.")
     except Exception as e:
-        print(f"Error sending data to {device_id}: {e}")
+        print(f"Error sending data: {e}")
 
-# Function to fetch the latest message for a given UID
-def fetch_latest_message(uid):
+
+def delete_message_by_id(message_id):
+    try:
+        delete_api_url = f"https://cms-backend-five.vercel.app/api/alert/readedSwToW/{message_id}"
+        response = requests.put(delete_api_url)
+    except Exception as e:
+        print(f"Error deleting message with ID {message_id}: {e}")
+
+
+def fetch_latest_message():
     global last_message_id
-
     try:
         response = requests.get(alert_api_url)
         if response.status_code == 200:
             data = response.json()
             if data["success"]:
-                for message in data["mssg"]:
-                    if message["jawaanId"] == uid and not message["resolved"]:
-                        if message["messageId"] != last_message_id[uid]:
-                            last_message_id[uid] = message["messageId"]
-                            return message["message"]
-        else:
-            print(f"Failed to fetch data. Status code: {response.status_code}")
+                messages = data["data"]
+                if messages and messages[0]["_id"] != last_message_id:
+                    last_message_id = messages[0]["_id"]
+                    return messages[0]["reply"]
     except Exception as e:
-        print(f"Error fetching data: {e}")
-    return None
+        print(f"Error fetching latest message: {e}")
 
-# Function to delete the message by ID
-def delete_message_by_id(message_id, uid):
-    try:
-        delete_api_url = f"https://cms-backend-five.vercel.app/api/alert/readedSwToW/{message_id}"
-        response = requests.put(delete_api_url)
-    except Exception as e:
-        print(f"Error deleting message for {uid}: {e}")
 
-# Function to write data to the device
-def write_to_device(device_id, uid):
-    global last_message_id
-    while True:
-        latest_message = fetch_latest_message(uid)
+def write_to_device_periodically():
+    global stop_threads
+    while not stop_threads:
+        latest_message = fetch_latest_message()
         if latest_message:
-            send_data_to_device(device_id, latest_message)
-            if last_message_id[uid]:
-                delete_message_by_id(last_message_id[uid], uid)
+            send_data_to_device(latest_message)
+            delete_message_by_id(last_message_id)
         time.sleep(5)
 
-if __name__ == "__main__":
-    # Initialize serial connections
-    initialize_serial_connections()
 
-    # Create separate threads for reading and writing for each device
-    threads = []
-    for i, device_id in enumerate(DEVICE_IDS):
-        read_thread = threading.Thread(target=read_from_device, args=(device_id, UIDS[i]))
-        write_thread = threading.Thread(target=write_to_device, args=(device_id, UIDS[i]))
-        threads.extend([read_thread, write_thread])
+def start_threads():
+    global threads, stop_threads
+    stop_threads = False
 
-    # Start all threads
-    for thread in threads:
-        thread.start()
+    if not threads['read'] or not threads['read'].is_alive():
+        threads['read'] = threading.Thread(target=read_from_device)
+        threads['read'].start()
 
-    # Wait for all threads to complete
-    for thread in threads:
-        thread.join()
+    if not threads['write'] or not threads['write'].is_alive():
+        threads['write'] = threading.Thread(target=write_to_device_periodically)
+        threads['write'].start()
+
+    if not threads['connection_status'] or not threads['connection_status'].is_alive():
+        threads['connection_status'] = threading.Thread(target=check_connection_status)
+        threads['connection_status'].start()
+
+
+def stop_all_threads():
+    global stop_threads
+    stop_threads = True
+    time.sleep(1)  # Ensure threads exit gracefully
+
+
+# Start the threads
+start_threads()
